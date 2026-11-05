@@ -1274,7 +1274,7 @@ class WP_SQLite_PDO_User_Defined_Functions {
 		}
 
 		$newline  = $unix_lines ? '(*LF)' : '(*ANY)';
-		$compiled = '/' . $newline . $this->regexp_escape_pattern( $pattern ) . '/' . $modifiers;
+		$compiled = '/' . $newline . $this->regexp_translate_pattern( $pattern, ! $case_sensitive ) . '/' . $modifiers;
 
 		/*
 		 * Compile errors are the only preg failures that emit PHP warnings.
@@ -1295,19 +1295,34 @@ class WP_SQLite_PDO_User_Defined_Functions {
 	}
 
 	/**
-	 * Escape pattern delimiters and NUL bytes that are not already escaped.
+	 * Translate a MySQL regex pattern to PCRE syntax.
 	 *
-	 * PHP before 8.2 rejects NUL bytes in patterns, so they become "\x00".
+	 * Escapes pattern delimiters and NUL bytes that are not already escaped. PHP
+	 * before 8.2 rejects NUL bytes in patterns, so they become "\x00". POSIX
+	 * classes that PCRE reads differently from ICU become Unicode properties.
 	 *
-	 * @param string $pattern The regex pattern.
+	 * @param string $pattern          The regex pattern.
+	 * @param bool   $case_insensitive Whether the pattern ignores case by default.
 	 *
 	 * @return string Pattern safe to wrap in slash delimiters.
 	 */
-	private function regexp_escape_pattern( $pattern ) {
+	private function regexp_translate_pattern( $pattern, $case_insensitive ) {
 		$special = array(
 			'/'  => '\\/',
 			"\0" => '\\x00',
 		);
+		$classes = array();
+
+		/*
+		 * With the "u" modifier, PCRE reads [:upper:] and [:lower:] case-sensitively
+		 * even when the pattern ignores case, where ICU matches both cases. \p{L&}
+		 * doesn't follow inline flags, so a pattern with "(?-i)" keeps PCRE's reading.
+		 */
+		if ( $case_insensitive && ! preg_match( '/\(\?[a-zA-Z]*-[a-zA-Z]*i/', $pattern ) ) {
+			$classes['upper'] = '{L&}';
+			$classes['lower'] = '{L&}';
+		}
+
 		$escaped = '';
 		$quoted  = false;
 		$length  = strlen( $pattern );
@@ -1332,6 +1347,13 @@ class WP_SQLite_PDO_User_Defined_Functions {
 				++$i;
 			} elseif ( isset( $special[ $character ] ) ) {
 				$escaped .= $special[ $character ];
+			} elseif (
+				'[' === $character
+				&& preg_match( '/\G\[:(\^?)(\w+):\]/', $pattern, $class, 0, $i )
+				&& isset( $classes[ $class[2] ] )
+			) {
+				$escaped .= ( '' === $class[1] ? '\\p' : '\\P' ) . $classes[ $class[2] ];
+				$i       += strlen( $class[0] ) - 1;
 			} else {
 				$escaped .= $character;
 			}
